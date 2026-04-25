@@ -13,6 +13,12 @@ from PIL import Image
 
 app = Flask(__name__)
 
+@app.before_request
+def bloquear_acesso_externo():
+    ip = request.remote_addr
+    if ip not in ("127.0.0.1", "::1"):
+        return "Acesso negado.", 403
+
 # ── Estado em memória ──────────────────────────────────────────────────────────
 SESSION = {
     "analysis": None,       # JarAnalysis atual
@@ -647,14 +653,34 @@ document.getElementById('btnExportAll').addEventListener('click', async () => {
 document.getElementById('btnSave').addEventListener('click', async () => {
   const pending = entries.filter(e => e.replaced);
   if (!pending.length) { toast('Nenhuma substituição pendente', 'error'); return; }
-  toast('Salvando JAR...');
-  const res = await fetch('/api/save', { method: 'POST' });
-  const data = await res.json();
-  if (data.error) { toast(data.error, 'error'); return; }
-  toast(`✔ JAR salvo: ${data.path}`);
-  // Marca como salvas
-  entries.forEach(e => { if (e.replaced) { e.replaced = true; } });
-  renderList(entries);
+  toast('Gerando JAR...');
+  try {
+    const res = await fetch('/api/save', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json();
+      toast(data.error || 'Erro ao salvar', 'error');
+      return;
+    }
+    // Dispara o download direto no navegador
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : 'modified.jar';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('✔ Download iniciado!');
+    // Marca entradas como salvas
+    entries.forEach(e => { if (e.replaced) { e.replaced = true; } });
+    renderList(entries);
+  } catch(e) {
+    toast('Erro ao gerar JAR', 'error');
+  }
 });
 
 // ── Novo JAR ──────────────────────────────────────────────────────────────────
@@ -814,22 +840,50 @@ def api_save():
     if not pending:
         return jsonify(error="Nenhuma substituição pendente")
 
-    jar_stem  = Path(analysis.jar_path).stem
-    out_folder = Path.home() / "jar_png_output"
-    out_folder.mkdir(parents=True, exist_ok=True)
-    out_path = str(out_folder / f"{jar_stem}_modified.jar")
+    jar_stem = Path(analysis.jar_path).stem
+    filename = f"{jar_stem}_modified.jar"
 
-    stats = apply_replacements(analysis, out_path)
-    if stats["errors"]:
-        return jsonify(error="\n".join(stats["errors"]))
+    # Grava em memória para enviar direto ao navegador
+    buf = io.BytesIO()
 
-    # Marca como salvas
+    # apply_replacements adaptado para buffer
+    import zipfile as zf_mod, shutil as sh_mod
+    replacements_by_entry = {}
+    for e in analysis.entries:
+        if e.replacement is not None:
+            replacements_by_entry.setdefault(e.jar_entry, []).append(e)
+
+    try:
+        with zf_mod.ZipFile(analysis.jar_path, "r") as zf_in,              zf_mod.ZipFile(buf, "w", compression=zf_mod.ZIP_DEFLATED) as zf_out:
+            for info in zf_in.infolist():
+                data = zf_in.read(info.filename)
+                if info.filename in replacements_by_entry:
+                    entries_sorted = sorted(
+                        replacements_by_entry[info.filename],
+                        key=lambda e: e.offset, reverse=True)
+                    new_data = bytearray(data)
+                    for entry in entries_sorted:
+                        del new_data[entry.offset:entry.end]
+                        new_data[entry.offset:entry.offset] = entry.replacement
+                    zf_out.writestr(info, bytes(new_data))
+                else:
+                    zf_out.writestr(info, data)
+    except Exception as ex:
+        return jsonify(error=str(ex))
+
+    # Marca entradas como salvas
     for e in analysis.entries:
         if e.replacement:
             e.replaced    = True
             e.replacement = None
 
-    return jsonify(ok=True, path=out_path, replaced=stats["replaced"])
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/java-archive",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.route("/api/reset", methods=["POST"])
@@ -850,4 +904,4 @@ if __name__ == "__main__":
     print()
     print("  Para encerrar: Ctrl+C")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=5000, debug=False)
