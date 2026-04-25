@@ -686,6 +686,9 @@ document.getElementById('btnSave').addEventListener('click', async () => {
 // ── Novo JAR ──────────────────────────────────────────────────────────────────
 document.getElementById('btnNew').addEventListener('click', async () => {
   await fetch('/api/reset', { method: 'POST' });
+  // Reseta o input de arquivo para permitir reenviar o mesmo JAR
+  const inp = document.getElementById('jarInput');
+  inp.value = '';
   resetUI();
 });
 
@@ -890,6 +893,7 @@ def api_save():
 def api_reset():
     SESSION["analysis"] = None
     SESSION["jar_path"] = None
+    SESSION["tmp_files"] = []
     return jsonify(ok=True)
 
 
